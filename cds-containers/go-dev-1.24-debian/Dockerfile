@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM golang:1.24.3
+FROM golang:1.27.1
 
 # Set locale for proper terminal support
 ENV LANG=C.UTF-8
