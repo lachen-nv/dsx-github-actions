@@ -36,7 +36,7 @@ jobs:
 
       - name: Build, scan, and publish the same artifact
         id: image
-        uses: lachen-nv/dsx-github-actions/.github/actions/docker-build@3c2c42f5dfd8fcd07b3c7fbc044ffb506434900e
+        uses: lachen-nv/dsx-github-actions/.github/actions/docker-build@5e395ef48b426699a28ce775e5a07a85f985b5ff
         with:
           image: ${{ env.TEST_IMAGE }}
           tags: |
