@@ -6,7 +6,7 @@ name: E2E Docker Build (issue 70)
 on:
   push:
     branches: [e2e/70-docker-build]
-    paths: [.github/workflows/e2e-docker-build.yml]
+    paths: [.github/workflows/e2e-docker-build.yml, .github/scripts/docker-credential-e2e]
 
 permissions:
   contents: read
@@ -14,12 +14,17 @@ permissions:
 
 env:
   TEST_IMAGE: ghcr.io/lachen-nv/dsx-actions-e2e
-  TEST_TAG: go-dev-alpine-amd64-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
   build-scan-publish:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        auth: [inline, credHelpers, credsStore]
+    env:
+      TEST_TAG: go-dev-alpine-amd64-${{ matrix.auth }}-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout the real CDS Dockerfiles
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -33,10 +38,28 @@ jobs:
             sudo install -m 0644 /dev/null /etc/buildkit/buildkitd.toml
           fi
           df -h "$RUNNER_TEMP"
+          echo "E2E_HELPER_STORE=$RUNNER_TEMP/e2e-helper-credentials.json" >> "$GITHUB_ENV"
+
+      - name: Configure host-only credential helper
+        if: matrix.auth != 'inline'
+        env:
+          AUTH_MODE: ${{ matrix.auth }}
+        run: |
+          set -euo pipefail
+          umask 077
+          config_dir="$(mktemp -d "$RUNNER_TEMP/e2e-docker-config.XXXXXX")"
+          if [[ "$AUTH_MODE" == credHelpers ]]; then
+            jq -n '{credHelpers: {"ghcr.io": "e2e"}}' > "$config_dir/config.json"
+          else
+            jq -n '{credsStore: "e2e"}' > "$config_dir/config.json"
+          fi
+          chmod +x .github/scripts/docker-credential-e2e
+          echo "$GITHUB_WORKSPACE/.github/scripts" >> "$GITHUB_PATH"
+          echo "DOCKER_CONFIG=$config_dir" >> "$GITHUB_ENV"
 
       - name: Build, scan, and publish the same artifact
         id: image
-        uses: lachen-nv/dsx-github-actions/.github/actions/docker-build@5e395ef48b426699a28ce775e5a07a85f985b5ff
+        uses: lachen-nv/dsx-github-actions/.github/actions/docker-build@0e6ae4ca6c51aeb86b629265f386c2b7b01d0abb
         with:
           image: ${{ env.TEST_IMAGE }}
           tags: |
@@ -64,11 +87,20 @@ jobs:
 
       - name: Verify published digests, platforms, and scan reports
         env:
+          AUTH_MODE: ${{ matrix.auth }}
           BUILD_DIGEST: ${{ steps.image.outputs.digest }}
           PUBLISHED_TAGS: ${{ steps.image.outputs.tags }}
         run: |
           set -euo pipefail
           shopt -s nullglob
+          if [[ "$AUTH_MODE" != inline ]]; then
+            [[ -f "$E2E_HELPER_STORE" ]]
+            [[ "$(stat -c '%a' "$E2E_HELPER_STORE")" == 600 ]]
+            # Prove publication used helper credentials, not inline fallback.
+            jq -e '[.auths[]? | select((.auth // "") != "")] | length == 0' "$DOCKER_CONFIG/config.json"
+          fi
+          auth_files=("$RUNNER_TEMP"/docker-publish.*/auth.json)
+          [[ ${#auth_files[@]} -eq 0 ]]
           report_dirs=("$RUNNER_TEMP"/docker-build-scan.*/reports)
           [[ ${#report_dirs[@]} -eq 1 ]]
           reports="${report_dirs[0]}"
