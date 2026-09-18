@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: E2E Docker Build (issue 70)
+
+on:
+  push:
+    branches: [e2e/70-docker-build]
+    paths: [.github/workflows/e2e-docker-build.yml]
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  TEST_IMAGE: ghcr.io/lachen-nv/dsx-actions-e2e
+  TEST_TAG: go-dev-alpine-${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  build-scan-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout the real CDS Dockerfiles
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Prepare the BuildKit configuration expected by the action
+        run: |
+          if [[ ! -f /etc/buildkit/buildkitd.toml ]]; then
+            sudo install -d /etc/buildkit
+            sudo install -m 0644 /dev/null /etc/buildkit/buildkitd.toml
+          fi
+          df -h "$RUNNER_TEMP"
+
+      - name: Build, scan both architectures, and publish the same artifact
+        id: image
+        uses: lachen-nv/dsx-github-actions/.github/actions/docker-build@3c2c42f5dfd8fcd07b3c7fbc044ffb506434900e
+        with:
+          image: ${{ env.TEST_IMAGE }}
+          tags: |
+            ${{ env.TEST_TAG }}
+            ${{ env.TEST_TAG }}-alias
+          context: ./cds-containers
+          dockerfile: ./cds-containers/go-dev-1.24-alpine/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: "true"
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          cache: "false"
+          security-scan-enabled: "true"
+          # This first flow test permits findings in the real dev image so it
+          # exercises authenticated publication. Production defaults stay true.
+          security-scan-fail-on-critical: "false"
+          provenance: mode=max
+          sbom: "true"
+          labels: |
+            org.opencontainers.image.source=https://github.com/lachen-nv/dsx-github-actions
+            org.opencontainers.image.description=Temporary issue 70 E2E test
+
+      - name: Verify published digests, platforms, and scan reports
+        env:
+          BUILD_DIGEST: ${{ steps.image.outputs.digest }}
+          PUBLISHED_TAGS: ${{ steps.image.outputs.tags }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          report_dirs=("$RUNNER_TEMP"/docker-build-scan.*/reports)
+          [[ ${#report_dirs[@]} -eq 1 ]]
+          reports="${report_dirs[0]}"
+          index="$RUNNER_TEMP/published-index.json"
+
+          while IFS= read -r ref; do
+            [[ -n "$ref" ]] || continue
+            docker buildx imagetools inspect "$ref" --raw > "$index"
+            actual="$(sha256sum "$index")"
+            [[ "sha256:${actual%% *}" == "$BUILD_DIGEST" ]]
+            printf 'Published digest matches: %s at %s\n' "$ref" "$BUILD_DIGEST"
+          done <<< "$PUBLISHED_TAGS"
+
+          jq -e '[.manifests[] | select(.platform.os == "linux") | .platform.architecture] | sort == ["amd64", "arm64"]' "$index"
+          jq -e '[.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest")] | length == 2' "$index"
+          for arch in amd64 arm64; do
+            digest="$(jq -er --arg arch "$arch" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest' "$index")"
+            jq -e --arg digest "$digest" '.source.metadata.manifestDigest == $digest' "$reports/linux-$arch.syft.json"
+            jq -e --arg digest "$digest" '.source.target.manifestDigest == $digest' "$reports/linux-$arch.grype.json"
+            jq -e '.spdxVersion' "$reports/linux-$arch.spdx.json"
+            printf 'linux/%s scan report matches published manifest: %s\n' "$arch" "$digest"
+          done
+          printf '\n### E2E verified\n\nImage: %s:%s\n\nBuild and both published tags: %s\n\nBoth architecture reports match the registry manifests; both attestations are present.\n' \
+            "$TEST_IMAGE" "$TEST_TAG" "$BUILD_DIGEST" >> "$GITHUB_STEP_SUMMARY"
