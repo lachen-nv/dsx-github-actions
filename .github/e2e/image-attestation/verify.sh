@@ -34,15 +34,17 @@ while IFS=$'\t' read -r platform digest; do
     --predicate-type https://spdx.dev/Document/v2.3 --format json > "$RUNNER_TEMP/verified-sbom.json"
   jq -e --slurpfile expected "$REPORTS/$key.spdx.json" \
     'any(.[]; .verificationResult.statement.predicate == $expected[0])' "$RUNNER_TEMP/verified-sbom.json" >/dev/null
+  # Run the verified child: Docker's classic store cannot cache both architectures
+  # under the same multi-platform index digest.
   if [[ "$FIXTURE" == go ]]; then
     actual="$(docker run --rm --platform "$platform" --network none --cap-drop=ALL \
-      --security-opt=no-new-privileges "$IMAGE@$DIGEST")"
+      --security-opt=no-new-privileges "$IMAGE@$digest")"
     [[ "$actual" == "hello from $platform" ]]
   else
     docker run --rm --platform "$platform" --network none --cap-drop=ALL \
-      --security-opt=no-new-privileges "$IMAGE@$DIGEST" go version
+      --security-opt=no-new-privileges "$IMAGE@$digest" go version
     docker run --rm --platform "$platform" --network none --cap-drop=ALL \
-      --security-opt=no-new-privileges "$IMAGE@$DIGEST" golangci-lint --version
+      --security-opt=no-new-privileges "$IMAGE@$digest" golangci-lint --version
   fi
   echo "PASS: $platform SBOM, signatures, digest and runtime" | tee -a "$GITHUB_STEP_SUMMARY"
 done < <(jq -r '.platforms[] | [.platform, .digest] | @tsv' "$REPORTS/image.json")
