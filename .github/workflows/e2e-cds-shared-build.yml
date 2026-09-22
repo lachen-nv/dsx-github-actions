@@ -15,26 +15,16 @@
 
 name: E2E CDS shared build integration
 
-# Trigger only on pushes to main or copy-pr-bot mirror branches, and only when relevant paths change
+# Fork-only adaptation of build-cds-containers.yml, scoped to the Go Alpine image.
 on:
   push:
     branches:
       - e2e/72-cds-publish
       - e2e/72-cds-local
-    paths:
-      - 'cds-containers/**'
-      - '.github/workflows/build-cds-containers.yml'
-      - '.github/actions/docker-build/**'
-      - '.github/workflows/attest-image.yml'
-      - '.github/scripts/prepare-image-attestation.sh'
-      - '.github/scripts/promote-attested-image.sh'
-      - '.github/scripts/check_cds_tags.py'
   workflow_dispatch:
 
 concurrency:
   group: build-cds-containers-${{ github.ref }}
-  # Keep pending releases; the default single pending slot replaces older runs.
-  queue: max
   cancel-in-progress: false
 
 env:
@@ -359,12 +349,12 @@ jobs:
           fi
           if [[ "$PUBLISH_RESULT" == "success" ]]; then
             {
-              echo "All 3 images passed smoke tests and were published. Usage:"
+              echo "The CDS Go Alpine image passed smoke tests and was published. Usage:"
               echo '```yaml'
               echo "container:"
-              echo "  image: $REGISTRY/$IMAGE_NAMESPACE/${IMAGE_PREFIX}tools:sha-$GITHUB_SHA"
+              echo "  image: $REGISTRY/$IMAGE_NAMESPACE/${IMAGE_PREFIX}go-dev-1.24-alpine:sha-$GITHUB_SHA"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "All 3 images passed smoke tests. This run did not publish release tags." >> "$GITHUB_STEP_SUMMARY"
+            echo "The CDS Go Alpine image passed smoke tests. This run did not publish release tags." >> "$GITHUB_STEP_SUMMARY"
           fi
