@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: E2E Image Attestation (issue 72)
+
+on:
+  push:
+    branches: [e2e/72-image-attestations]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cases:
+    if: github.repository == 'lachen-nv/dsx-github-actions'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: single-no-scan
+            platforms: linux/amd64
+            scan: false
+          - case: single-scan
+            platforms: linux/amd64
+            scan: true
+          - case: multi-no-scan
+            platforms: linux/amd64,linux/arm64
+            scan: false
+          - case: multi-scan
+            platforms: linux/amd64,linux/arm64
+            scan: true
+    uses: ./.github/workflows/e2e-image-attestation-case.yml
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    with:
+      case: ${{ matrix.case }}
+      platforms: ${{ matrix.platforms }}
+      scan: ${{ matrix.scan }}
+
+  cds:
+    needs: cases
+    uses: ./.github/workflows/e2e-image-attestation-case.yml
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    with:
+      case: cds-go-amd64
+      platforms: linux/amd64
+      scan: false
+      fixture: cds

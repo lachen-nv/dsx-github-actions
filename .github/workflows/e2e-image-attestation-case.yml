@@ -1,0 +1,151 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: E2E image attestation case
+
+on:
+  workflow_call:
+    inputs:
+      case:
+        required: true
+        type: string
+      platforms:
+        required: true
+        type: string
+      scan:
+        required: false
+        default: false
+        type: boolean
+      missing_sbom:
+        required: false
+        default: false
+        type: boolean
+      fixture:
+        required: false
+        default: go
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+      tags: ${{ steps.build.outputs.tags }}
+      sbom_artifact_id: ${{ inputs.missing_sbom && steps.incomplete.outputs.artifact-id || steps.build.outputs.sbom-artifact-id }}
+      original_artifact_id: ${{ steps.build.outputs.sbom-artifact-id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Scope all images to the fork test package
+        id: meta
+        env:
+          OWNER: ${{ github.repository_owner }}
+          CASE: ${{ inputs.case }}
+          FIXTURE: ${{ inputs.fixture }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == lachen-nv/dsx-github-actions ]]
+          [[ "$CASE" =~ ^[a-z0-9-]+$ && ( "$FIXTURE" == go || "$FIXTURE" == cds ) ]]
+          echo "image=ghcr.io/${OWNER,,}/dsx-attest-e2e" >> "$GITHUB_OUTPUT"
+      - name: Build candidate using this branch's shared action
+        id: build
+        uses: ./.github/actions/docker-build
+        with:
+          image: ${{ steps.meta.outputs.image }}
+          tags: e2e-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.case }}
+          context: ${{ inputs.fixture == 'cds' && 'cds-containers/go-dev-1.24-alpine' || '.github/e2e/image-attestation' }}
+          dockerfile: ${{ inputs.fixture == 'cds' && 'cds-containers/go-dev-1.24-alpine/Dockerfile' || '.github/e2e/image-attestation/Dockerfile' }}
+          platforms: ${{ inputs.platforms }}
+          push: "true"
+          prepare-attestation: "true"
+          security-scan-enabled: ${{ inputs.scan && 'true' || 'false' }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          buildkit-config: ""
+          cache-scope: attest-e2e-${{ inputs.case }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=e2e-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.case }}
+      - name: Download evidence for the negative test
+        if: inputs.missing_sbom
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ steps.build.outputs.sbom-artifact-id }}
+          path: incomplete-evidence
+          merge-multiple: true
+      - name: Deliberately omit the arm64 SPDX file
+        if: inputs.missing_sbom
+        run: mv incomplete-evidence/linux-arm64.spdx.json incomplete-evidence/linux-arm64.spdx.omitted
+      - name: Upload incomplete evidence
+        if: inputs.missing_sbom
+        id: incomplete
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: incomplete-sbom-${{ github.run_id }}-${{ github.run_attempt }}
+          path: incomplete-evidence
+          if-no-files-found: error
+          retention-days: 1
+
+  attest:
+    needs: build
+    uses: ./.github/workflows/attest-image.yml
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    with:
+      image: ${{ needs.build.outputs.image }}
+      digest: ${{ needs.build.outputs.digest }}
+      platforms: ${{ inputs.platforms }}
+      sbom_artifact_id: ${{ needs.build.outputs.sbom_artifact_id }}
+      tags: ${{ needs.build.outputs.tags }}
+      registry: ghcr.io
+    secrets:
+      REGISTRY_USERNAME: ${{ github.actor }}
+      REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+
+  verify:
+    name: Independent verification
+    needs: [build, attest]
+    if: always() && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.original_artifact_id }}
+          path: evidence
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check registry evidence and the final tag on a fresh runner
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ needs.build.outputs.image }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+          IMAGE_TAG: ${{ needs.build.outputs.tags }}
+          ATTEST_RESULT: ${{ needs.attest.result }}
+          NEGATIVE: ${{ inputs.missing_sbom && 'true' || 'false' }}
+          FIXTURE: ${{ inputs.fixture }}
+          REPORTS: evidence
+        run: bash .github/e2e/image-attestation/verify.sh

@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: E2E Missing SBOM (expected failure)
+
+on:
+  push:
+    branches: [e2e/72-image-attestations]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  negative:
+    if: github.repository == 'lachen-nv/dsx-github-actions'
+    uses: ./.github/workflows/e2e-image-attestation-case.yml
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    with:
+      case: missing-arm64-sbom
+      platforms: linux/amd64,linux/arm64
+      missing_sbom: true
